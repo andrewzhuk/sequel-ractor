@@ -14,10 +14,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Ruby 4.0 is the floor — see required_ruby_version in the
-        # gemspec for the reasoning (Ractor#value, Method shareability).
-        # Add new Ruby versions as they ship.
-        ruby: ["4.0", "head"]
+        # The gem requires Ruby 4.0+ (see required_ruby_version in the
+        # gemspec for the reasoning — Ractor#value, Method shareability).
+        # As of this writing 4.0 isn't in ruby/setup-ruby's catalog yet
+        # (asking for "4.0" silently falls back to the latest 3.x), so
+        # we run against `head` only. Once 4.0 ships as a tagged build
+        # in setup-ruby, add it back here.
+        ruby: ["head"]
 
     services:
       postgres:
@@ -61,9 +64,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # Same Ruby version story as the rspec job — must be >= 4.0.
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.4"
+          ruby-version: "head"
           bundler-cache: true
 
       - name: Build gem
