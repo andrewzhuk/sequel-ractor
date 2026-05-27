@@ -13,7 +13,7 @@ main-process-only patterns (DDL inside workers, runtime extension
 registration) intentionally don't — these belong in your bootstrap,
 not your hot path.
 
-## What works ✅
+## What works
 
 Verified by `spec/integration_spec.rb` (34 specs, all green):
 
@@ -28,7 +28,7 @@ Verified by `spec/integration_spec.rb` (34 specs, all green):
 - The `pg_json` extension when loaded in main before finalize
 - Concurrent reads across many ractors (40k+ reads/sec measured)
 
-## What doesn't work — and probably never should ❌
+## What doesn't work — and probably never should
 
 These are main-process-only patterns by design. Don't do them in
 workers; do them at bootstrap.
@@ -105,16 +105,19 @@ SequelRactor.finalize!  # idempotent, safe to call multiple times
 
 ## Production hardening — `harden!`
 
-Sequel itself ships two complementary "lock down" mechanisms:
+`SequelRactor.harden!` is a single call that combines three lockdown
+mechanisms — two of them shipped by Sequel itself:
 
-  - `Database#freeze` — freezes the database's opts, pool config,
-    dataset class, loggers, loaded extensions.
-  - `Sequel::Model.freeze_descendants` (via the `:subclasses` plugin)
-    — finalises associations and freezes every model class.
+1. **`Database#freeze`** (Sequel built-in) — freezes the database's
+   opts, pool config, dataset class, loggers, and the set of loaded
+   extensions.
+2. **`Sequel::Model.freeze_descendants`** (Sequel built-in, requires
+   the `:subclasses` plugin) — finalises associations and freezes
+   every model class.
+3. **`SequelRactor.finalize!`** (this gem) — freezes Sequel's
+   process-global registries and marks adapter classes Ractor-shareable.
 
-Combined with `SequelRactor.finalize!` they give a complete
-"nothing about the data layer can change after boot" lockdown.
-The `harden!` helper does the three in one call:
+Bootstrap shape:
 
 ```ruby
 require "sequel"
@@ -129,19 +132,36 @@ DB.extension :pg_json
 # Define models, load app code...
 Dir["./models/*.rb"].each { |f| require f }
 
-# Lock everything down — one call.
 SequelRactor.harden!(database: DB, models: true)
 ```
 
-After `harden!`:
+Concretely, after that single call:
 
-- Calling `DB.extension(...)` raises `FrozenError`.
-- Adding new methods or hooks to a model class raises `FrozenError`.
-- Registering a new Sequel adapter raises `FrozenError`.
+```ruby
+DB.extension(:pg_array)
+# => FrozenError: can't modify frozen Sequel::Postgres::Database
 
-These guarantees are useful **independently of Ractors** — they catch
-accidental runtime mutation of the data-layer config in any
+Person.send(:define_method, :something) { }
+# => FrozenError: can't modify frozen class: Person
+
+Sequel.adapter_class(:my_custom_adapter)
+# => FrozenError: can't modify frozen Hash (Sequel::ADAPTER_MAP)
+
+Sequel::Database.after_initialize { |db| db.opts[:trace] = true }
+# => FrozenError on the @initialize_hook ivar
+```
+
+i.e. every mutation point that a runaway `require` (a misbehaving
+gem, a typo in a hot-reload path, a late-binding plugin call) might
+touch is now read-only. This is useful **independently of Ractors** —
+it catches accidental runtime mutation of the data-layer config in any
 multi-threaded production app.
+
+Multi-database apps:
+
+```ruby
+SequelRactor.harden!(databases: [READ_DB, WRITE_DB], models: true)
+```
 
 ### Important: `harden!` ≠ Ractor-shareable models
 
@@ -153,8 +173,7 @@ limitation.
 
 So `harden!` does **not** unlock `Sequel::Model` use inside worker
 Ractors. Use raw datasets (`db[:table].insert(...)`) in workers, and
-keep models in main for admin / HTTP layer. See the limitations
-section below.
+keep models in main for admin / HTTP layer.
 
 ## How it works
 
@@ -174,10 +193,7 @@ defines `def initialize; freeze; end`, but BasicObject doesn't have
 `method_missing` and silently does nothing. The object is therefore
 NOT actually frozen in vanilla Sequel. `sequel-ractor` force-freezes
 it via `Object.instance_method(:freeze).bind(vr).call`, then marks it
-shareable. This is arguably an upstream bug — candidate for a tiny
-PR to Sequel adding `extend ::Kernel` to VirtualRow or calling
-`Object.instance_method(:freeze).bind(self).call` inside its
-`initialize`.
+shareable.
 
 ## Trade-offs after `finalize!`
 
@@ -201,7 +217,7 @@ In `spec/hot_path_test.rb` on M1 / local Postgres:
 | 8 ractors × 250 reads each (concurrent SELECT) | ~40k reads/s |
 
 These are with vanilla `db[:table].insert(...)` / `.where(...).first`
-calls — the standard Sequel API, no special MicroDb-style shortcuts.
+calls — the standard Sequel API.
 
 ## Testing
 
@@ -230,38 +246,18 @@ CI runs the same split via `.github/workflows/ci.yml`.
 
 | adapter | Sequel-side finalisers | works in worker today? |
 |---|---|---|
-| `postgres` (pg gem) | ✅ `CONVERSION_PROCS`, `PG_QUERY_TYPE_MAP` | ✅ verified, this is the primary target |
-| `sqlite` (sqlite3 gem) | ✅ `SQLITE_TYPES` | ❌ blocked upstream — sqlite3's C extension marks `open_v2` as `Ractor::UnsafeError` |
-| `mysql2` / `trilogy` | ✅ `MYSQL_TYPES` (conditional — only if adapter loaded) | ⚠ untested locally (no MySQL); Sequel-side patches in place |
+| `postgres` (pg gem) | `CONVERSION_PROCS`, `PG_QUERY_TYPE_MAP` | yes — primary target, fully verified |
+| `sqlite` (sqlite3 gem) | `SQLITE_TYPES` | no — sqlite3's C extension marks `open_v2` as `Ractor::UnsafeError`, blocked upstream |
+| `mysql2` / `trilogy` | `MYSQL_TYPES` (loaded only if adapter is required) | untested locally without a MySQL server; Sequel-side patches in place |
 
-The SQLite story is interesting: our Sequel-side patches make
+The SQLite story is interesting: the Sequel-side patches make
 `Sequel::SQLite::SQLITE_TYPES` Ractor-safe, but you still can't
 `Sequel.connect("sqlite://path")` from a worker because the underlying
 `sqlite3` gem refuses to call `sqlite3_open_v2` outside the main
 Ractor. That's a C-extension level decision in the sqlite3 gem, not
 something this shim can override. When sqlite3 lifts that restriction
-(or someone writes a Ractor-safe alternative), Sequel-side will Just
-Work.
-
-## Roadmap
-
-Each remaining task is isolated and additive — adding it doesn't
-disturb what already works.
-
-1. **MySQL coverage verification**: spec-level tests once mysql2 or
-   trilogy is available in CI. Sequel-side patches already in place.
-2. **Sequel::Model support**. Significant audit — model class-level
-   state (@dataset, @columns, plugin chains, hooks) all need
-   eager-init or shareable treatment. May be architecturally blocked
-   by the `ConnectionPool` Mutex regardless — see "harden! ≠ Ractor-
-   shareable models" above.
-3. **Prepared statements API**: `db[:t].prepare(:foo, "...")` —
-   covered by specs (see `spec/integration_spec.rb`).
-4. **`Sequel.extension(:fiber_concurrency)` interaction**: confirm
-   the fiber-aware pool inside a Ractor still works.
-5. **Upstream PRs**: at minimum the VirtualRow `freeze`-isn't-freeze
-   issue is worth a tiny PR — it's a real (latent) bug in vanilla
-   Sequel.
+(or someone writes a Ractor-safe alternative), Sequel-side will just
+work.
 
 ## Contributing
 
