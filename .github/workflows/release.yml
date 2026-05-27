@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # for GitHub Release creation
+      id-token: write # for OIDC token exchange with rubygems.org
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      # Sanity check: the tag must match the gemspec version.
+      # e.g. tag v0.1.0 → gemspec version "0.1.0"
+      - name: Verify tag matches gemspec version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          GEM_VERSION=$(ruby -e 'require_relative "lib/sequel/ractor/version"; puts SequelRactor::VERSION')
+          echo "Tag:     $TAG_VERSION"
+          echo "Gemspec: $GEM_VERSION"
+          if [ "$TAG_VERSION" != "$GEM_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match gemspec version $GEM_VERSION"
+            exit 1
+          fi
+
+      # Builds the gem, authenticates to rubygems via OIDC, pushes,
+      # creates the GitHub Release with the .gem file attached.
+      - uses: rubygems/release-gem@v1

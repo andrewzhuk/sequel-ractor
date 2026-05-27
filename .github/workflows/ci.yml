@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rspec:
+    name: rspec (ruby ${{ matrix.ruby }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ractor is experimental on 3.2/3.3 — we still support those,
+        # but the gem is primarily exercised on 3.4+. Add new Ruby
+        # versions as they ship.
+        ruby: ["3.3", "3.4", "4.0", "head"]
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MICRO_PG_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -p 5432 -U postgres && break
+            sleep 1
+          done
+
+      - name: Run specs
+        run: bundle exec rspec spec/ --format progress
+
+  gem-build:
+    name: gem build (smoke)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Build gem
+        run: gem build sequel-ractor.gemspec

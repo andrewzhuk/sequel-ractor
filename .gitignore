@@ -1,0 +1,17 @@
+# Built gems
+*.gem
+
+# Bundler / RubyGems
+/Gemfile.lock
+/.bundle/
+/vendor/bundle/
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+
+# Specs / coverage
+/coverage/
+/tmp/
