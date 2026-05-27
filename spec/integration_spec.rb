@@ -47,7 +47,12 @@ RSpec.describe "sequel-ractor integration" do
         db.disconnect
         db_name
       end
-      expect(r.value).to eq("micro_test")
+      # current_database() must match whatever DB the URL points at.
+      # The URL is configurable via MICRO_PG_TEST_URL, so derive the
+      # expected name instead of hard-coding it.
+      require "uri"
+      expected = URI.parse(URL).path.delete_prefix("/")
+      expect(r.value).to eq(expected)
     end
 
     it "lets 4 workers run independent inserts in parallel" do
