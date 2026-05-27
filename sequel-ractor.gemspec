@@ -13,7 +13,20 @@ Gem::Specification.new do |spec|
   spec.license     = "MIT"
   spec.homepage    = "https://github.com/andrewzhuk/sequel-ractor"
 
-  spec.required_ruby_version = ">= 3.2"
+  # Ruby 4.0+ is required. Earlier versions ship a Ractor API that's
+  # incompatible in two practical ways:
+  #
+  #   - Ractor#value (used to await a Ractor's result) doesn't exist
+  #     before 4.0 — the old name was #take.
+  #   - Method objects can't be marked Ractor.make_shareable on 3.x.
+  #     Sequel::Postgres::CONVERSION_PROCS contains Method values
+  #     (Kernel.BigDecimal, Sequel.string_to_time, etc.), so worker
+  #     connect fails on 3.x even after finalize!.
+  #
+  # Both are fixed in 4.0 onwards. The gem could in principle add a
+  # take/value shim and avoid touching Method values, but for an
+  # experimental-Ractor gem aimed at 4.0+ it isn't worth the code.
+  spec.required_ruby_version = ">= 4.0"
   spec.files         = Dir["lib/**/*.rb", "README.md", "LICENSE", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
 

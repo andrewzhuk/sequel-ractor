@@ -13,6 +13,12 @@ main-process-only patterns (DDL inside workers, runtime extension
 registration) intentionally don't — these belong in your bootstrap,
 not your hot path.
 
+**Requires Ruby 4.0+.** Earlier versions ship a Ractor API the gem
+can't work around — specifically, `Ractor#value` doesn't exist yet
+(it was `#take`), and `Method` objects can't be marked
+`Ractor.make_shareable`. Sequel's `Postgres::CONVERSION_PROCS`
+contains Method values, so workers fail to connect on Ruby 3.x.
+
 ## What works
 
 Verified by `spec/integration_spec.rb` (34 specs, all green):

@@ -14,10 +14,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Ractor is experimental on 3.2/3.3 — we still support those,
-        # but the gem is primarily exercised on 3.4+. Add new Ruby
-        # versions as they ship.
-        ruby: ["3.3", "3.4", "4.0", "head"]
+        # Ruby 4.0 is the floor — see required_ruby_version in the
+        # gemspec for the reasoning (Ractor#value, Method shareability).
+        # Add new Ruby versions as they ship.
+        ruby: ["4.0", "head"]
 
     services:
       postgres:

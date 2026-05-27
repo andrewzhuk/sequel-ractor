@@ -2,6 +2,19 @@ require "sequel"
 require_relative "ractor/version"
 require_relative "ractor/patches"
 
+# Defensive runtime check. `required_ruby_version` in the gemspec
+# guards `gem install`, but a user can still end up here via a path:
+# or git: dependency that bypasses version checking, or via a script
+# that pre-installs the gem then runs under a downgraded Ruby. Fail
+# fast with a clear message instead of letting the user trip into
+# the obscure Method-shareability error.
+if RUBY_VERSION < "4.0"
+  raise LoadError,
+        "sequel-ractor requires Ruby 4.0+ (got #{RUBY_VERSION}). " \
+        "Earlier versions lack Ractor#value and can't make Method " \
+        "objects shareable, both of which the gem relies on."
+end
+
 # Ractor compatibility shim for Sequel.
 #
 # Quick start (two lines in your bootstrap):
