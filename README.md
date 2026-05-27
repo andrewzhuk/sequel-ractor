@@ -103,65 +103,144 @@ spawning a high-contention workload):
 SequelRactor.finalize!  # idempotent, safe to call multiple times
 ```
 
-## Production hardening — `harden!`
+## Locking down the data layer in production
 
-`SequelRactor.harden!` is a single call that combines three lockdown
-mechanisms — two of them shipped by Sequel itself:
+In a long-running production app you almost never want to change
+Sequel's config after boot. A misbehaving `require`, a hot-reload
+path, a late-binding plugin call — any of these can mutate global
+state and cause hard-to-debug bugs hours later. Sequel + this gem let
+you make that state read-only once initialization is complete.
 
-1. **`Database#freeze`** (Sequel built-in) — freezes the database's
-   opts, pool config, dataset class, loggers, and the set of loaded
-   extensions.
-2. **`Sequel::Model.freeze_descendants`** (Sequel built-in, requires
-   the `:subclasses` plugin) — finalises associations and freezes
-   every model class.
-3. **`SequelRactor.finalize!`** (this gem) — freezes Sequel's
-   process-global registries and marks adapter classes Ractor-shareable.
+There are three things to freeze, in this order. You can do them
+one by one (so you understand what each step costs), or call
+`harden!` to do all three at once.
 
-Bootstrap shape:
+### Step 1: freeze the database
+
+Once your app has connected and loaded all the extensions it needs,
+call `freeze` on the `Database` object. Sequel ships this method out
+of the box:
 
 ```ruby
-require "sequel"
-require "sequel/adapters/postgres"
-require "sequel/ractor"
-
-Sequel::Model.plugin :subclasses   # so freeze_descendants can find them
-
 DB = Sequel.connect(ENV["DATABASE_URL"])
 DB.extension :pg_json
+DB.extension :pg_array
+# ... more extensions, more setup ...
 
-# Define models, load app code...
-Dir["./models/*.rb"].each { |f| require f }
-
-SequelRactor.harden!(database: DB, models: true)
+DB.freeze
 ```
 
-Concretely, after that single call:
+From now on:
 
 ```ruby
-DB.extension(:pg_array)
+DB.extension(:something_else)
 # => FrozenError: can't modify frozen Sequel::Postgres::Database
 
-Person.send(:define_method, :something) { }
+DB.loggers << my_logger
+# => FrozenError: can't modify frozen Array
+
+DB.opts[:single_threaded] = true
+# => FrozenError: can't modify frozen Hash
+```
+
+The connection pool keeps working — queries, transactions, prepared
+statements are all unaffected. Only **configuration** is locked.
+
+### Step 2: freeze your models
+
+If you use `Sequel::Model`, freeze every model subclass in one call.
+This requires the `:subclasses` plugin (Sequel uses it to find them
+all):
+
+```ruby
+# At the very top of your bootstrap, BEFORE any model is defined:
+Sequel::Model.plugin :subclasses
+
+# Define your models as usual:
+class Person < Sequel::Model(DB[:people])
+  validates_presence_of :email
+  plugin :timestamps
+end
+# ... more models ...
+
+# After every model file is loaded:
+Sequel::Model.freeze_descendants
+```
+
+Now class-level mutations on any model raise `FrozenError`:
+
+```ruby
+Person.send(:define_method, :nickname) { name.split.first }
 # => FrozenError: can't modify frozen class: Person
 
-Sequel.adapter_class(:my_custom_adapter)
+Person.plugin :validation_helpers
+# => FrozenError on Person's plugin chain
+```
+
+Instance behaviour is unchanged — `Person.create(...)`, `person.save`,
+`person.email = "..."` all still work. Only the **class** is sealed.
+
+### Step 3: freeze the process-global registries
+
+Sequel keeps several mutable Hashes for adapter and extension lookup
+— `Sequel::ADAPTER_MAP`, `Sequel::Database::EXTENSIONS`, and a few
+adapter-specific ones (`Postgres::CONVERSION_PROCS`, etc.). They
+stay writable forever in vanilla Sequel. This gem freezes them:
+
+```ruby
+SequelRactor.finalize!
+```
+
+After this:
+
+```ruby
+require "sequel/adapters/some_new_one"
 # => FrozenError: can't modify frozen Hash (Sequel::ADAPTER_MAP)
 
 Sequel::Database.after_initialize { |db| db.opts[:trace] = true }
 # => FrozenError on the @initialize_hook ivar
 ```
 
-i.e. every mutation point that a runaway `require` (a misbehaving
-gem, a typo in a hot-reload path, a late-binding plugin call) might
-touch is now read-only. This is useful **independently of Ractors** —
-it catches accidental runtime mutation of the data-layer config in any
-multi-threaded production app.
+This step is also what makes worker Ractors safe: the registries
+become not just frozen but `Ractor.shareable?`, so a worker can read
+them when it calls `Sequel.connect(url)`.
 
-Multi-database apps:
+### The shortcut: `harden!`
+
+The three steps above are common enough that the gem bundles them
+into one call:
+
+```ruby
+require "sequel"
+require "sequel/adapters/postgres"
+require "sequel/ractor"
+
+Sequel::Model.plugin :subclasses
+
+DB = Sequel.connect(ENV["DATABASE_URL"])
+DB.extension :pg_json
+Dir["./models/*.rb"].each { |f| require f }
+
+# Equivalent to: DB.freeze + Sequel::Model.freeze_descendants + finalize!
+SequelRactor.harden!(database: DB, models: true)
+```
+
+If you have multiple databases (e.g. read/write split), pass them
+as `databases:`:
 
 ```ruby
 SequelRactor.harden!(databases: [READ_DB, WRITE_DB], models: true)
 ```
+
+If you don't use `Sequel::Model`, drop `models: true`:
+
+```ruby
+SequelRactor.harden!(database: DB)
+```
+
+You don't need workers or Ractors to benefit from this — `harden!` is
+just as useful in a single-threaded Sinatra app to catch accidental
+runtime mutation of data-layer config.
 
 ### Important: `harden!` ≠ Ractor-shareable models
 
